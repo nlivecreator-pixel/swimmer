@@ -94,4 +94,3 @@ Visit `http://localhost:8000/docs` for interactive Swagger documentation.
 - Data is **in-memory** (resets on server restart). For production, add PostgreSQL + Redis.
 - Voice chat requires both users to be on the **same network** OR a TURN server for production.
 - STUN servers used: Google's public STUN (stun.l.google.com)
-"# swimmer" 

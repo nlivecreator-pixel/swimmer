@@ -4,41 +4,42 @@ import { useStore, Message } from '../../lib/store';
 import { socket } from '../../lib/socket';
 import { decryptMessage, getCachedKey } from '../../lib/crypto';
 import PollWidget from '../modals/PollWidget';
+import UserProfileModal from '../modals/UserProfileModal';
 
 function fmtSize(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
-
 const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '😮', '😢'];
 
-function Avatar({ user, size = 36 }: { user: any; size?: number }) {
-  if (user?.avatar_url) {
-    return (
-      <img
-        src={`http://localhost:8000${user.avatar_url}`}
-        alt={user.name}
-        style={{
-          width: size, height: size, borderRadius: '50%',
-          objectFit: 'cover', flexShrink: 0, display: 'block',
-        }}
-      />
-    );
-  }
+function AvatarImg({ user, size = 36, onClick, style }: any) {
   return (
-    <div style={{
-      width: size, height: size, borderRadius: '50%',
-      background: user?.color || '#5a5ad8',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: size * 0.42, fontWeight: 700, color: '#fff', flexShrink: 0,
-    }}>
-      {user?.letter || '?'}
+    <div
+      onClick={onClick}
+      title={user?.name}
+      style={{
+        width: size, height: size, borderRadius: '50%', overflow: 'hidden',
+        flexShrink: 0, cursor: onClick ? 'pointer' : 'default',
+        background: user?.color || '#5a5ad8',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: size * 0.42, fontWeight: 700, color: '#fff',
+        transition: 'transform .12s, box-shadow .12s',
+        ...(onClick ? { ':hover': { transform: 'scale(1.1)' } } : {}),
+        ...style,
+      }}
+    >
+      {user?.avatar_url ? (
+        <img src={`http://localhost:8000${user.avatar_url}`} alt={user.name}
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+      ) : (
+        user?.letter || '?'
+      )}
     </div>
   );
 }
 
-function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }: any) {
+function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg, onProfileClick }: any) {
   const [hover, setHover] = useState(false);
   const [decrypted, setDecrypted] = useState<string | null>(null);
   const { me } = useStore();
@@ -51,10 +52,8 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
     decryptMessage(msg.text, k).then(setDecrypted).catch(() => setDecrypted('[зашифровано]'));
   }, [msg.text, msg.encrypted]);
 
-  const txt = msg.encrypted ? (decrypted ?? '···') : msg.text;
+  const txt   = msg.encrypted ? (decrypted ?? '···') : msg.text;
   const total = Object.values(msg.reactions || {}).reduce((s: number, a: any) => s + a.length, 0);
-
-  // Group consecutive messages from same sender
   const prevSid = prevMsg?.uid || prevMsg?.from_uid;
   const thisSid = msg.uid || msg.from_uid;
   const isContinuation = prevSid === thisSid && !msg.reply_to;
@@ -66,16 +65,17 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      {/* Avatar — only show on first of group or if own */}
-      <div style={{ width: 36, flexShrink: 0, alignSelf: 'flex-end' }}>
-        {(!isContinuation) && (
+      {/* Avatar slot */}
+      <div style={{ width: 36, flexShrink: 0 }}>
+        {!isContinuation && (
           <div style={{ position: 'relative' }}>
-            <Avatar user={sender} size={36} />
+            <AvatarImg user={sender} size={36} onClick={(e: any) => onProfileClick(thisSid, e)} />
             {sender?.online && (
               <div style={{
                 position: 'absolute', bottom: 0, right: 0,
                 width: 10, height: 10, borderRadius: '50%',
                 background: 'var(--green)', border: '2px solid var(--bg-1)',
+                pointerEvents: 'none',
               }} />
             )}
           </div>
@@ -83,14 +83,23 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
       </div>
 
       <div style={{ maxWidth: 520, display: 'flex', flexDirection: 'column', gap: 3, alignItems: isOwn ? 'flex-end' : 'flex-start', minWidth: 0 }}>
-        {/* Name + timestamp — only first of group */}
+        {/* Name row — clickable */}
         {!isContinuation && (
-          <div style={{ display: 'flex', gap: 7, alignItems: 'center', paddingLeft: isOwn ? 0 : 4, paddingRight: isOwn ? 4 : 0, flexDirection: isOwn ? 'row-reverse' : 'row' }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: sender?.color || 'var(--accent-2)' }}>{sender?.name || '?'}</span>
+          <div style={{
+            display: 'flex', gap: 7, alignItems: 'center',
+            paddingLeft: isOwn ? 0 : 4, paddingRight: isOwn ? 4 : 0,
+            flexDirection: isOwn ? 'row-reverse' : 'row',
+          }}>
+            <span
+              style={{ fontSize: 13, fontWeight: 700, color: sender?.color || 'var(--accent-2)', cursor: 'pointer' }}
+              onClick={(e) => onProfileClick(thisSid, e)}
+            >
+              {sender?.name || '?'}
+            </span>
             <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{msg.ts}</span>
             {msg.encrypted && (
-              <span className="e2e-badge" style={{ padding: '1px 5px', fontSize: 10 }}>
-                <span className="ms filled" style={{ fontSize: 10 }}>lock</span>
+              <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: 'var(--accent-subtle)', color: 'var(--accent-2)', display: 'flex', gap: 3, alignItems: 'center' }}>
+                <span className="ms filled" style={{ fontSize: 10 }}>lock</span>E2E
               </span>
             )}
           </div>
@@ -99,26 +108,24 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
         {/* Reply preview */}
         {msg.reply_to && (
           <div style={{
-            display: 'flex', gap: 7, padding: '3px 10px', borderRadius: '7px 7px 0 0',
+            display: 'flex', gap: 6, padding: '3px 10px', borderRadius: '7px 7px 0 0',
             background: 'var(--accent-subtle)', borderLeft: '2px solid var(--accent)',
             fontSize: 12, color: 'var(--text-3)', maxWidth: 480,
           }}>
-            <span className="ms" style={{ fontSize: 14, flexShrink: 0 }}>reply</span>
+            <span className="ms" style={{ fontSize: 13, flexShrink: 0 }}>reply</span>
             {msg.reply_to.text?.slice(0, 60)}
           </div>
         )}
 
-        {/* Message content */}
+        {/* Content */}
         {msg.type === 'sticker' ? (
           <div style={{ fontSize: 68, lineHeight: 1, padding: '4px 0' }}>{msg.sticker?.emoji}</div>
-
         ) : msg.type === 'image' ? (
           <div style={{ borderRadius: 14, overflow: 'hidden', maxWidth: 360 }}>
             <img src={`http://localhost:8000${msg.file?.url}`} alt=""
               style={{ display: 'block', maxWidth: '100%', maxHeight: 320, objectFit: 'cover' }} />
             {txt && <div className={`msg-bubble${isOwn ? ' own' : ''}`} style={{ borderRadius: '0 0 14px 14px' }}>{txt}</div>}
           </div>
-
         ) : msg.type === 'file' ? (
           <div className="file-preview">
             <div className="file-icon">
@@ -133,13 +140,11 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
               <span className="ms ms-lg">download</span>
             </a>
           </div>
-
         ) : msg.type === 'poll' ? (
           <div className={`msg-bubble${isOwn ? ' own' : ''}`} style={{ minWidth: 290 }}>
             {txt && <p style={{ marginBottom: 8, fontSize: 14 }}>{txt}</p>}
             {msg.poll && <PollWidget poll={msg.poll} />}
           </div>
-
         ) : txt ? (
           <div className={`msg-bubble${isOwn ? ' own' : ''}`}>{txt}</div>
         ) : null}
@@ -181,12 +186,20 @@ function MessageRow({ msg, isOwn, sender, onReact, onReply, onDelete, prevMsg }:
 }
 
 export default function MessageList() {
-  const { activeChannelId, activeDmUid, messages, dmMessages, users, me, setReplyTo } = useStore();
+  const {
+    activeChannelId, activeDmUid, messages, dmMessages, users, me, setReplyTo,
+    setActiveDm, setDmMessages, setActiveServer, activeServerId,
+  } = useStore();
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef   = useRef<HTMLDivElement>(null);
+  const isAtBottom = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [unreadCount,   setUnreadCount]   = useState(0);
-  const isAtBottom = useRef(true);
+
+  // Profile popup state
+  const [profileUid,   setProfileUid]   = useState<string | null>(null);
+  const [profileRect,  setProfileRect]  = useState<DOMRect | null>(null);
 
   const msgs: Message[] = activeChannelId
     ? messages[activeChannelId] || []
@@ -196,33 +209,20 @@ export default function MessageList() {
 
   const scrollToBottom = useCallback((smooth = true) => {
     bottomRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant' });
-    setShowScrollBtn(false);
-    setUnreadCount(0);
-    isAtBottom.current = true;
+    setShowScrollBtn(false); setUnreadCount(0); isAtBottom.current = true;
   }, []);
 
-  // Scroll to bottom when channel changes
-  useEffect(() => {
-    scrollToBottom(false);
-  }, [activeChannelId, activeDmUid]);
+  useEffect(() => { scrollToBottom(false); }, [activeChannelId, activeDmUid]);
 
-  // Handle new messages
   useEffect(() => {
-    if (msgs.length === 0) return;
-    if (isAtBottom.current) {
-      scrollToBottom(true);
-    } else {
-      // Show unread button
-      setUnreadCount(c => c + 1);
-      setShowScrollBtn(true);
-    }
+    if (!msgs.length) return;
+    if (isAtBottom.current) scrollToBottom(true);
+    else { setUnreadCount(c => c + 1); setShowScrollBtn(true); }
   }, [msgs.length]);
 
   const onScroll = useCallback(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = distFromBottom < 80;
+    const el = listRef.current; if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     isAtBottom.current = atBottom;
     if (atBottom) { setShowScrollBtn(false); setUnreadCount(0); }
   }, []);
@@ -234,13 +234,27 @@ export default function MessageList() {
     socket.send({ type: 'delete_msg', message_id: mid, channel_id: activeChannelId });
   }
 
+  function handleProfileClick(uid: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setProfileUid(uid); setProfileRect(rect);
+  }
+
+  async function openDm(uid: string) {
+    setProfileUid(null);
+    if (!me || uid === me.id) return;
+    setActiveServer('');
+    setActiveDm(uid);
+    const msgs = await fetch(`/api/dm/${me.id}/${uid}`).then(r => r.json());
+    setDmMessages([me.id, uid].sort().join('__'), msgs);
+  }
+
   if (!msgs.length) return (
     <div className="messages-list" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
       <div style={{ textAlign: 'center', color: 'var(--text-3)', paddingBottom: 48 }}>
         <span className="ms" style={{
           fontSize: 56, display: 'block', marginBottom: 12, opacity: .3,
-          fontVariationSettings: "'FILL' 1,'wght' 300,'GRAD' 0,'opsz' 48",
-          color: 'var(--accent)',
+          color: 'var(--accent)', fontVariationSettings: "'FILL' 1,'wght' 300",
         }}>chat_bubble</span>
         <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--text-2)', marginBottom: 4 }}>Начни разговор!</div>
         <div style={{ fontSize: 13 }}>Здесь будут появляться сообщения</div>
@@ -253,7 +267,7 @@ export default function MessageList() {
     <div style={{ flex: 1, position: 'relative', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div ref={listRef} className="messages-list" onScroll={onScroll}>
         {msgs.map((msg, i) => {
-          const sid = msg.uid || msg.from_uid;
+          const sid   = msg.uid || msg.from_uid;
           const isOwn = sid === me?.id;
           return (
             <MessageRow
@@ -263,38 +277,48 @@ export default function MessageList() {
               onReact={handleReact}
               onReply={(m: Message) => setReplyTo(m)}
               onDelete={handleDelete}
+              onProfileClick={handleProfileClick}
             />
           );
         })}
         <div ref={bottomRef} style={{ height: 1 }} />
       </div>
 
-      {/* Scroll-to-bottom button with unread count */}
+      {/* Scroll-to-bottom button */}
       {showScrollBtn && (
-        <button
-          onClick={() => scrollToBottom(true)}
-          style={{
-            position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
-            display: 'flex', alignItems: 'center', gap: 7,
-            padding: '8px 16px', borderRadius: 20,
-            background: 'var(--accent)', color: '#fff', border: 'none',
-            cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, fontSize: 13,
-            boxShadow: '0 4px 20px rgba(90,90,216,0.5)',
-            animation: 'slideUp .2s ease',
-            zIndex: 10,
-          }}
-        >
+        <button onClick={() => scrollToBottom(true)} style={{
+          position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+          display: 'flex', alignItems: 'center', gap: 7,
+          padding: '8px 18px', borderRadius: 20,
+          background: 'var(--accent)', color: '#fff', border: 'none',
+          cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600, fontSize: 13,
+          boxShadow: '0 4px 20px rgba(90,90,216,0.5)',
+          animation: 'slideUp .2s ease', zIndex: 10,
+        }}>
           {unreadCount > 0 && (
-            <span style={{
-              background: 'rgba(255,255,255,0.25)', borderRadius: 10,
-              padding: '1px 7px', fontSize: 12, fontWeight: 800,
-            }}>{unreadCount}</span>
+            <span style={{ background: 'rgba(255,255,255,0.25)', borderRadius: 10, padding: '1px 7px', fontSize: 12, fontWeight: 800 }}>
+              {unreadCount}
+            </span>
           )}
-          <span style={{ fontSize: 13 }}>Новые сообщения</span>
+          Новые сообщения
           <span className="ms ms-sm filled">keyboard_double_arrow_down</span>
         </button>
       )}
-      <style>{`@keyframes slideUp{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}`}</style>
+
+      {/* Profile popup */}
+      {profileUid && (
+        <UserProfileModal
+          userId={profileUid}
+          serverId={activeServerId || null}
+          anchorRect={profileRect}
+          onClose={() => { setProfileUid(null); setProfileRect(null); }}
+          onDm={() => openDm(profileUid)}
+        />
+      )}
+
+      <style>{`
+        @keyframes slideUp{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+      `}</style>
     </div>
   );
 }

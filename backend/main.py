@@ -3,7 +3,7 @@ import hashlib, json, os, shutil, uuid, secrets
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional, Dict, List, Set
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -15,8 +15,36 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+USERS_FILE   = os.path.join(DATA_DIR, "users.json")
+SERVERS_FILE = os.path.join(DATA_DIR, "servers.json")
+
+def load_json(path: str, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[warn] Could not load {path}: {e}")
+    return default
+
+def save_users():
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(USERS, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[warn] Could not save users: {e}")
+
+def save_servers():
+    try:
+        with open(SERVERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(SERVERS, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[warn] Could not save servers: {e}")
+
 # ─── In-memory state ──────────────────────────────────────────────
-USERS: Dict[str, dict] = {}
+USERS: Dict[str, dict] = load_json(USERS_FILE, {})
 
 def make_channel(cid, sid, name, ch_type, topic=""):
     return {"id": cid, "server_id": sid, "name": name, "type": ch_type, "topic": topic}
@@ -34,8 +62,8 @@ def make_server(sid, name, icon, owner_id, channels=None):
         "channels": channels, "members": [],
         "roles": [
             {"id": f"{sid}_r1", "name": "Участник",  "color": "#aaaacc", "permissions": ["read","send"]},
-            {"id": f"{sid}_r2", "name": "Модератор", "color": "#5ae8b8", "permissions": ["read","send","delete","kick"]},
-            {"id": f"{sid}_r3", "name": "Админ",     "color": "#e85a9a", "permissions": ["read","send","delete","kick","manage"]},
+            {"id": f"{sid}_r2", "name": "Модератор", "color": "#5ae8b8", "permissions": ["read","send","delete","kick","news"]},
+            {"id": f"{sid}_r3", "name": "Админ",     "color": "#e85a9a", "permissions": ["read","send","delete","kick","manage","news"]},
         ],
         "member_roles": {},
         "stickers": [
@@ -45,16 +73,36 @@ def make_server(sid, name, icon, owner_id, channels=None):
         "invites": {},
     }
 
-SERVERS: Dict[str, dict] = {
+_default_servers = {
     "s1": make_server("s1","Swimer HQ","🌊","system"),
     "s2": make_server("s2","Gaming","🎮","system"),
 }
+SERVERS: Dict[str, dict] = load_json(SERVERS_FILE, _default_servers)
+if not SERVERS:
+    SERVERS = _default_servers
 ALL_CHANNELS: Dict[str, dict] = {ch["id"]: ch for s in SERVERS.values() for ch in s["channels"]}
 MESSAGES:    Dict[str, List[dict]] = defaultdict(list)
 DM_MESSAGES: Dict[str, List[dict]] = defaultdict(list)
 POLLS:       Dict[str, dict] = {}
 WS_CONNECTIONS: Dict[str, WebSocket] = {}
 VOICE_ROOMS: Dict[str, Set[str]] = defaultdict(set)
+
+CONTACTS_FILE = os.path.join(DATA_DIR, "contacts.json")
+# Per-user list of DM contact UIDs: { uid: [contact_uid, ...] }
+DM_CONTACTS: Dict[str, List[str]] = load_json(CONTACTS_FILE, {})
+
+def save_contacts():
+    try:
+        with open(CONTACTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(DM_CONTACTS, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[warn] Could not save contacts: {e}")
+
+def add_dm_contact(uid: str, contact_uid: str):
+    if uid not in DM_CONTACTS: DM_CONTACTS[uid] = []
+    if contact_uid not in DM_CONTACTS[uid]:
+        DM_CONTACTS[uid].append(contact_uid)
+        save_contacts()
 
 AVATAR_COLORS = ["#5a5ad8","#e85a9a","#5ae8b8","#e8a85a","#a85ae8","#5ae8e8","#e8e85a","#e85a5a","#5ae85a","#5ab8e8"]
 GLOBAL_STICKERS = [
@@ -87,7 +135,9 @@ async def broadcast_all(payload, exclude=None):
         except: pass
 
 async def broadcast_server_members(srv, payload):
-    """Send to all online members of a server"""
+    """Send to all online members of a server. Auto-persists on server_update."""
+    if payload.get("type") in ("server_update", "server_created", "member_joined"):
+        save_servers()
     raw = json.dumps(payload)
     for uid in srv.get("members", []):
         ws = WS_CONNECTIONS.get(uid)
@@ -120,9 +170,11 @@ async def register(b: RegBody):
         "bio": "", "avatar_url": None, "online": False,
         "password_hash": hashlib.sha256(b.password.encode()).hexdigest(),
         "public_key": None,
+        "created_at": full_ts(),
     }
     for s in SERVERS.values():
         if uid not in s["members"]: s["members"].append(uid)
+    save_users(); save_servers()
     return safe_user(USERS[uid])
 
 @app.post("/api/login")
@@ -131,13 +183,22 @@ async def login(b: LoginBody):
     for uid, u in USERS.items():
         if u["name"].lower() == b.username.lower() and u["password_hash"] == ph:
             if b.public_key: USERS[uid]["public_key"] = b.public_key
+            changed = False
             for s in SERVERS.values():
-                if uid not in s["members"]: s["members"].append(uid)
+                if uid not in s["members"]: s["members"].append(uid); changed = True
+            if changed: save_servers()
             return safe_user(u)
     raise HTTPException(401, "Invalid credentials")
 
 @app.get("/api/users")
 async def list_users(): return [safe_user(u) for u in USERS.values()]
+
+@app.get("/api/session/{uid}")
+async def check_session(uid: str):
+    """Used by frontend to verify session after page reload. Returns user if valid."""
+    u = USERS.get(uid)
+    if not u: raise HTTPException(404, "Session expired — please log in again")
+    return safe_user(u)
 
 @app.get("/api/users/{uid}")
 async def get_user(uid: str):
@@ -146,7 +207,7 @@ async def get_user(uid: str):
     return safe_user(u)
 
 @app.put("/api/users/{uid}")
-async def update_user(uid: str, body: dict):
+async def update_user(uid: str, body: dict = Body(...)):
     if uid not in USERS: raise HTTPException(404)
     allowed = {"bio","color","avatar_url","name","public_key"}
     for k,v in body.items():
@@ -154,7 +215,7 @@ async def update_user(uid: str, body: dict):
             USERS[uid][k] = v
             if k == "name" and v: USERS[uid]["letter"] = v[0].upper()
     u = safe_user(USERS[uid])
-    # Broadcast profile update to ALL connected users
+    save_users()
     await broadcast_all({"type": "user_update", "user": u})
     return u
 
@@ -168,6 +229,7 @@ async def upload_avatar(uid: str, file: UploadFile = File(...)):
     url = f"/uploads/{fname}"
     USERS[uid]["avatar_url"] = url
     u = safe_user(USERS[uid])
+    save_users()
     await broadcast_all({"type": "user_update", "user": u})
     return u
 
@@ -184,7 +246,34 @@ async def search_users(q: str):
 
 # ─── Servers ──────────────────────────────────────────────────────
 @app.get("/api/servers")
-async def get_servers(): return list(SERVERS.values())
+async def get_servers(uid: str = ""):
+    """Return only servers this user is a member of."""
+    if not uid:
+        return list(SERVERS.values())
+    return [s for s in SERVERS.values() if uid in s.get("members", [])]
+
+@app.get("/api/dm_contacts/{uid}")
+async def get_dm_contacts(uid: str):
+    contacts = DM_CONTACTS.get(uid, [])
+    users_out = []
+    for cid in contacts:
+        u = USERS.get(cid)
+        if u: users_out.append(safe_user(u))
+    return users_out
+
+@app.post("/api/dm_contacts/{uid}")
+async def add_contact(uid: str, body: dict = Body(...)):
+    contact_uid = body.get("contact_uid", "")
+    if not contact_uid or contact_uid not in USERS: raise HTTPException(404, "User not found")
+    add_dm_contact(uid, contact_uid)
+    return safe_user(USERS[contact_uid])
+
+@app.delete("/api/dm_contacts/{uid}/{contact_uid}")
+async def remove_contact(uid: str, contact_uid: str):
+    if uid in DM_CONTACTS and contact_uid in DM_CONTACTS[uid]:
+        DM_CONTACTS[uid].remove(contact_uid)
+        save_contacts()
+    return {"ok": True}
 
 @app.get("/api/servers/{sid}")
 async def get_server(sid: str):
@@ -202,25 +291,53 @@ async def create_server(b: CreateServerBody):
     srv["members"].append(b.owner_id)
     SERVERS[sid] = srv
     rebuild_channels_map()
+    save_servers()
     # Broadcast to the owner immediately
     await send_to(b.owner_id, {"type": "server_created", "server": srv})
     return srv
 
 class UpdateServerBody(BaseModel):
-    name: Optional[str] = None; icon: Optional[str] = None; description: Optional[str] = None
+    name: Optional[str] = None; icon: Optional[str] = None
+    description: Optional[str] = None; image_url: Optional[str] = None
+
+def get_member_permissions(srv: dict, uid: str) -> list:
+    """Get permissions list for a member in a server."""
+    if uid == srv.get("owner_id"): return ["read","send","delete","kick","manage","news"]
+    role_id = srv.get("member_roles",{}).get(uid)
+    if role_id:
+        role = next((r for r in srv.get("roles",[]) if r["id"] == role_id), None)
+        if role: return role.get("permissions", ["read","send"])
+    # Default: first role = member
+    roles = srv.get("roles", [])
+    if roles: return roles[0].get("permissions", ["read","send"])
+    return ["read","send"]
+
+def can_manage_server(srv: dict, uid: str) -> bool:
+    return "manage" in get_member_permissions(srv, uid)
+
+def can_write_news(srv: dict, uid: str) -> bool:
+    perms = get_member_permissions(srv, uid)
+    return "manage" in perms or "news" in perms or uid == srv.get("owner_id")
 
 @app.put("/api/servers/{sid}")
-async def update_server(sid: str, b: UpdateServerBody):
+async def update_server(sid: str, b: UpdateServerBody, request: Request):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
+    uid = request.headers.get("X-User-Id","")
+    if uid and not can_manage_server(s, uid): raise HTTPException(403, "No permission")
     if b.name is not None: s["name"] = b.name
     if b.icon is not None: s["icon"] = b.icon
     if b.description is not None: s["description"] = b.description
+    if b.image_url is not None: s["image_url"] = b.image_url if b.image_url else None
     await broadcast_server_members(s, {"type": "server_update", "server": s})
     return s
 
 @app.post("/api/servers/{sid}/image")
-async def upload_server_image(sid: str, file: UploadFile = File(...)):
+async def upload_server_image(sid: str, file: UploadFile = File(...), request: Request = None):
+    s = SERVERS.get(sid)
+    if not s: raise HTTPException(404)
+    uid = request.headers.get("X-User-Id","") if request else ""
+    if uid and not can_manage_server(s, uid): raise HTTPException(403, "No permission")
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -232,7 +349,7 @@ async def upload_server_image(sid: str, file: UploadFile = File(...)):
     return s
 
 @app.post("/api/servers/{sid}/channels")
-async def add_channel(sid: str, body: dict):
+async def add_channel(sid: str, body: dict = Body(...)):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     cid = str(uuid.uuid4())[:8]
@@ -252,7 +369,7 @@ async def delete_channel(sid: str, cid: str):
     return {"ok": True}
 
 @app.post("/api/servers/{sid}/roles")
-async def add_role(sid: str, body: dict):
+async def add_role(sid: str, body: dict = Body(...)):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     rid  = str(uuid.uuid4())[:8]
@@ -262,7 +379,7 @@ async def add_role(sid: str, body: dict):
     return role
 
 @app.put("/api/servers/{sid}/members/{uid}/role")
-async def set_member_role(sid: str, uid: str, body: dict):
+async def set_member_role(sid: str, uid: str, body: dict = Body(...)):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     s["member_roles"][uid] = body.get("role_id")
@@ -272,7 +389,7 @@ async def set_member_role(sid: str, uid: str, body: dict):
     return {"ok": True}
 
 @app.post("/api/servers/{sid}/stickers")
-async def add_sticker(sid: str, body: dict):
+async def add_sticker(sid: str, body: dict = Body(...)):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     sk = {"id": str(uuid.uuid4())[:6], "emoji": body.get("emoji","?"), "name": body.get("name","sticker")}
@@ -290,7 +407,7 @@ async def del_sticker(sid: str, skid: str):
 
 # ─── Invites ──────────────────────────────────────────────────────
 @app.post("/api/servers/{sid}/invites")
-async def create_invite(sid: str, body: dict):
+async def create_invite(sid: str, body: dict = Body(...)):
     s = SERVERS.get(sid)
     if not s: raise HTTPException(404)
     code = secrets.token_urlsafe(8)
@@ -305,7 +422,7 @@ async def get_invite(code: str):
     raise HTTPException(404, "Not found")
 
 @app.post("/api/invites/{code}/join")
-async def join_invite(code: str, body: dict):
+async def join_invite(code: str, body: dict = Body(...)):
     uid = body.get("uid")
     for sid, s in SERVERS.items():
         if code in s["invites"]:
@@ -344,13 +461,13 @@ async def upload(file: UploadFile = File(...)):
 
 # ─── Polls ─────────────────────────────────────────────────────────
 @app.post("/api/polls")
-async def create_poll(body: dict):
+async def create_poll(body: dict = Body(...)):
     pid = str(uuid.uuid4())[:8]
     POLLS[pid] = {"id":pid,"question":body["question"],"options":[{"text":o,"votes":[]} for o in body["options"]],"created_at":full_ts()}
     return POLLS[pid]
 
 @app.post("/api/polls/{pid}/vote")
-async def vote(pid: str, body: dict):
+async def vote(pid: str, body: dict = Body(...)):
     poll = POLLS.get(pid)
     if not poll: raise HTTPException(404)
     uid, idx = body.get("uid"), body.get("option_idx")
@@ -366,8 +483,11 @@ async def get_stickers(): return GLOBAL_STICKERS
 # ─── WebSocket ─────────────────────────────────────────────────────
 @app.websocket("/ws/{uid}")
 async def ws_hub(ws: WebSocket, uid: str):
-    if uid not in USERS: await ws.close(1008); return
     await ws.accept()
+    if uid not in USERS:
+        await ws.send_text(json.dumps({"type": "error", "message": "Сессия истекла, войдите снова", "code": "SESSION_EXPIRED"}))
+        await ws.close(1008)
+        return
     WS_CONNECTIONS[uid] = ws
     USERS[uid]["online"] = True
 
@@ -386,23 +506,31 @@ async def ws_hub(ws: WebSocket, uid: str):
 
             if t == "channel_msg":
                 cid = msg["channel_id"]; mid = str(uuid.uuid4())[:8]
-                entry = {
-                    "id":mid,"uid":uid,"channel_id":cid,
-                    "text":msg.get("text",""),"encrypted":msg.get("encrypted",False),
-                    "ts":now_ts(),"full_ts":full_ts(),"reactions":{},"type":"text",
-                    "reply_to":msg.get("reply_to"),
-                }
-                if msg.get("file"):    entry.update({"file":msg["file"],"type":msg["file"]["type"]})
-                if msg.get("sticker"): entry.update({"sticker":msg["sticker"],"type":"sticker"})
-                if msg.get("poll_id"): entry.update({"poll_id":msg["poll_id"],"poll":POLLS.get(msg["poll_id"]),"type":"poll"})
-                MESSAGES[cid].append(entry)
-                # Broadcast to all members of the server that has this channel
+                # Permission check for news channels
+                blocked = False
                 for srv in SERVERS.values():
-                    if any(c["id"] == cid for c in srv["channels"]):
-                        await broadcast_server_members(srv, {"type":"channel_msg","message":entry})
+                    ch = next((c for c in srv["channels"] if c["id"] == cid), None)
+                    if ch and ch.get("type") == "news" and not can_write_news(srv, uid):
+                        await send_to(uid, {"type":"error","message":"Только модераторы могут писать в новостной канал"})
+                        blocked = True
                         break
-                else:
-                    await broadcast_all({"type":"channel_msg","message":entry})
+                if not blocked:
+                    entry = {
+                        "id":mid,"uid":uid,"channel_id":cid,
+                        "text":msg.get("text",""),"encrypted":msg.get("encrypted",False),
+                        "ts":now_ts(),"full_ts":full_ts(),"reactions":{},"type":"text",
+                        "reply_to":msg.get("reply_to"),
+                    }
+                    if msg.get("file"):    entry.update({"file":msg["file"],"type":msg["file"]["type"]})
+                    if msg.get("sticker"): entry.update({"sticker":msg["sticker"],"type":"sticker"})
+                    if msg.get("poll_id"): entry.update({"poll_id":msg["poll_id"],"poll":POLLS.get(msg["poll_id"]),"type":"poll"})
+                    MESSAGES[cid].append(entry)
+                    for srv in SERVERS.values():
+                        if any(c["id"] == cid for c in srv["channels"]):
+                            await broadcast_server_members(srv, {"type":"channel_msg","message":entry})
+                            break
+                    else:
+                        await broadcast_all({"type":"channel_msg","message":entry})
 
             elif t == "dm":
                 to = msg["to"]; mid = str(uuid.uuid4())[:8]
@@ -415,9 +543,14 @@ async def ws_hub(ws: WebSocket, uid: str):
                 if msg.get("sticker"): entry.update({"sticker":msg["sticker"],"type":"sticker"})
                 key = dm_key(uid, to)
                 DM_MESSAGES[key].append(entry)
+                # Auto-add each other as contacts
+                add_dm_contact(uid, to)
+                add_dm_contact(to, uid)
                 p = {"type":"dm","message":entry}
                 await send_to(uid, p)
                 if uid != to: await send_to(to, p)
+                # Notify recipient to add sender to contacts if not already
+                await send_to(to, {"type":"contact_added","user":safe_user(USERS[uid])})
 
             elif t == "react":
                 mid = msg["message_id"]; emoji = msg["emoji"]

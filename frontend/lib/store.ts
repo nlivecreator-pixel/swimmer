@@ -142,6 +142,12 @@ interface AppState {
   showCreateServer:boolean; setShowCreateServer:(v:boolean)=>void;
   showInvite:string|null; setShowInvite:(sid:string|null)=>void;
   searchQuery:string; setSearchQuery:(q:string)=>void;
+
+  dmContacts:User[]; setDmContacts:(u:User[])=>void;
+  addDmContact:(u:User)=>void; removeDmContact:(uid:string)=>void;
+  dmUnread:Record<string,number>;
+  incDmUnread:(uid:string)=>void; clearDmUnread:(uid:string)=>void;
+  mobileSidebarOpen:boolean; setMobileSidebarOpen:(v:boolean)=>void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -258,4 +264,17 @@ export const useStore = create<AppState>((set, get) => ({
   showCreateServer:false, setShowCreateServer:(v)=>set({showCreateServer:v}),
   showInvite:null, setShowInvite:(sid)=>set({showInvite:sid}),
   searchQuery:'', setSearchQuery:(q)=>set({searchQuery:q}),
+
+  dmContacts:[],
+  setDmContacts:(u)=>set({dmContacts:u}),
+  addDmContact:(u)=>set(s=>{
+    if(s.dmContacts.find(x=>x.id===u.id)) return {};
+    return {dmContacts:[...s.dmContacts,u]};
+  }),
+  removeDmContact:(uid)=>set(s=>({dmContacts:s.dmContacts.filter(x=>x.id!==uid)})),
+
+  dmUnread:{},
+  incDmUnread:(uid)=>set(s=>({dmUnread:{...s.dmUnread,[uid]:(s.dmUnread[uid]||0)+1}})),
+  clearDmUnread:(uid)=>set(s=>({dmUnread:{...s.dmUnread,[uid]:0}})),
+  mobileSidebarOpen:false, setMobileSidebarOpen:(v)=>set({mobileSidebarOpen:v}),
 }));

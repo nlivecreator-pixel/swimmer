@@ -4,12 +4,12 @@ import { useStore } from '../../lib/store';
 import { socket } from '../../lib/socket';
 import { generateKeyPair, exportPublicKey } from '../../lib/crypto';
 
-export default function AuthScreen() {
+export default function AuthScreen({ sessionError = '' }: { sessionError?: string }) {
   const { setMe } = useStore();
   const [tab, setTab]           = useState<'login' | 'register'>('login');
   const [username, setUsername]  = useState('');
   const [password, setPassword]  = useState('');
-  const [error, setError]        = useState('');
+  const [error, setError]        = useState(sessionError);
   const [loading, setLoading]    = useState(false);
 
   async function submit() {

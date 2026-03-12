@@ -5,12 +5,19 @@ import { ServerIcon } from '../chat/ServerSidebar';
 
 type Tab = 'overview' | 'channels' | 'roles' | 'members' | 'stickers';
 
-/* Server icon emojis are server branding/identity content chosen by users — kept */
 const SERVER_ICON_OPTIONS = ['🌐','🌊','🎮','🎵','🎨','💻','🏆','🚀','🔥','💜','⚡','🌍'];
 
 export default function ServerSettingsModal({ sid }: { sid: string }) {
-  const { servers, setShowServerSettings, t, updateServer } = useStore();
+  const { servers, setShowServerSettings, t, updateServer, me } = useStore();
   const srv = servers.find(s => s.id === sid);
+
+  // Helper: fetch with user auth header
+  function authFetch(url: string, opts: RequestInit = {}) {
+    return fetch(url, {
+      ...opts,
+      headers: { ...(opts.headers || {}), 'X-User-Id': me?.id || '' },
+    });
+  }
 
   const [tab,             setTab]             = useState<Tab>('overview');
   const [srvName,         setSrvName]         = useState(srv?.name        || '');
@@ -31,28 +38,28 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
   function showToast(msg: string) { setToast(msg); setTimeout(() => setToast(''), 2000); }
 
   async function saveOverview() {
-    const res  = await fetch(`/api/servers/${sid}`, {
+    const res = await authFetch(`/api/servers/${sid}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: srvName, description: srvDesc, icon: srvIcon }),
     });
-    updateServer(await res.json());
-    showToast('Сохранено!');
+    if (res.ok) { updateServer(await res.json()); showToast('Сохранено!'); }
+    else showToast('Нет прав для изменения сервера');
   }
 
   async function uploadServerImage(file: File) {
     setImgUploading(true);
     const fd = new FormData(); fd.append('file', file);
     try {
-      const res = await fetch(`/api/servers/${sid}/image`, { method: 'POST', body: fd });
-      updateServer(await res.json());
-      showToast('Фото обновлено!');
+      const res = await authFetch(`/api/servers/${sid}/image`, { method: 'POST', body: fd });
+      if (res.ok) { updateServer(await res.json()); showToast('Фото обновлено!'); }
+      else showToast('Нет прав');
     } catch { showToast('Ошибка загрузки'); }
     setImgUploading(false);
   }
 
   async function addChannel() {
     if (!newChName.trim()) return;
-    await fetch(`/api/servers/${sid}/channels`, {
+    await authFetch(`/api/servers/${sid}/channels`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newChName, type: newChType }),
     });
@@ -61,13 +68,13 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
   }
 
   async function deleteChannel(cid: string) {
-    await fetch(`/api/servers/${sid}/channels/${cid}`, { method: 'DELETE' });
+    await authFetch(`/api/servers/${sid}/channels/${cid}`, { method: 'DELETE' });
     showToast('Удалено');
   }
 
   async function addRole() {
     if (!newRoleName.trim()) return;
-    await fetch(`/api/servers/${sid}/roles`, {
+    await authFetch(`/api/servers/${sid}/roles`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newRoleName, color: newRoleColor }),
     });
@@ -77,7 +84,7 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
 
   async function addSticker() {
     if (!newStickerEmoji.trim() || !newStickerName.trim()) return;
-    await fetch(`/api/servers/${sid}/stickers`, {
+    await authFetch(`/api/servers/${sid}/stickers`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ emoji: newStickerEmoji, name: newStickerName }),
     });
@@ -86,7 +93,7 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
   }
 
   async function delSticker(skid: string) {
-    await fetch(`/api/servers/${sid}/stickers/${skid}`, { method: 'DELETE' });
+    await authFetch(`/api/servers/${sid}/stickers/${skid}`, { method: 'DELETE' });
     showToast('Удалено');
   }
 
@@ -172,11 +179,11 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
                   </button>
                   {srv.image_url && (
                     <button className="btn btn-danger" style={{ marginLeft: 8 }} onClick={async () => {
-                      const res = await fetch(`/api/servers/${sid}`, {
+                      const res = await authFetch(`/api/servers/${sid}`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ image_url: null }),
                       });
-                      updateServer(await res.json());
+                      if (res.ok) updateServer(await res.json());
                     }}>
                       <span className="ms ms-sm">delete</span>Удалить фото
                     </button>
@@ -327,7 +334,7 @@ export default function ServerSettingsModal({ sid }: { sid: string }) {
                   <select className="field" style={{ width: 140, padding: '4px 8px', fontSize: 12 }}
                     value={roleId || ''}
                     onChange={async e => {
-                      await fetch(`/api/servers/${sid}/members/${uid}/role`, {
+                      await authFetch(`/api/servers/${sid}/members/${uid}/role`, {
                         method: 'PUT', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ role_id: e.target.value || null }),
                       });
